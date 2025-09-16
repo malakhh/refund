@@ -1,21 +1,11 @@
 import streamlit as st
 import pandas as pd
-import re
-import asyncio
-import subprocess
-import sys
 
-# --- Automatically install Playwright Chromium on Streamlit Cloud ---
-subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
-
-from playwright.async_api import async_playwright
-
-# --- Streamlit page setup ---
 st.set_page_config(page_title="Detroit Axle Refund Calculator", layout="wide")
-st.title("🚗 Detroit Axle Refund Calculator")
+st.title("🚗 Detroit Axle Refund Calculator (Hosted)")
 
-# --- Theme toggle ---
-theme = st.sidebar.radio("Choose Theme:", ["Light", "Dark"])
+# --- Theme ---
+theme = st.sidebar.radio("Theme:", ["Light", "Dark"])
 if theme == "Dark":
     st.markdown("""
         <style>
@@ -33,113 +23,50 @@ else:
         </style>
         """, unsafe_allow_html=True)
 
-# --- Choose kit price mode ---
-mode = st.radio("Choose kit price mode:", ["Automatic from Kit", "Manual Entry"])
-if mode == "Manual Entry":
-    manual_kit_price = st.number_input("Enter Kit Price ($):", min_value=0.0, format="%.2f")
-else:
-    manual_kit_price = None
+# --- Kit Info ---
+kit_link = st.text_input("Kit Link (for reference):")
+kit_price = st.number_input("Kit Price ($):", min_value=0.0, step=0.01)
 
-# --- Kit link input ---
-kit_url = st.text_input("Paste the Detroit Axle Kit Link Here:")
+# --- Component Input ---
+st.subheader("Paste Component Info (Name | Part Number | Quantity)")
 
-# --- Function to extract second $ price ---
-def extract_second_price(text):
-    matches = re.findall(r'\$([0-9,]+(?:\.[0-9]{1,2})?)', text)
-    if len(matches) >= 2:
-        return float(matches[1].replace(',',''))
-    elif matches:
-        return float(matches[0].replace(',',''))
-    else:
-        return None
+comp_text = st.text_area(
+    "Example format:\nFront Rotor | 12345 | 2\nRear Rotor | 67890 | 2",
+    height=150
+)
 
-# --- Function to fetch kit and component prices using Playwright ---
-async def fetch_prices(kit_url):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-        await page.goto(kit_url)
-        await page.wait_for_timeout(3000)  # wait for JS to load
+if comp_text:
+    # Parse pasted text into DataFrame
+    rows = [line.strip().split("|") for line in comp_text.strip().split("\n") if line.strip()]
+    df = pd.DataFrame(rows, columns=["Component", "Part Number", "Quantity"])
+    df["Quantity"] = pd.to_numeric(df["Quantity"], errors='coerce').fillna(1)
+    df["Component Price ($)"] = 0.0  # placeholder for user input
 
-        # Kit price (automatic)
-        kit_price_auto = extract_second_price(await page.content())
+    st.subheader("Enter Component Prices")
+    for idx in df.index:
+        df.at[idx, "Component Price ($)"] = st.number_input(
+            f"{df.at[idx,'Component']} (${df.at[idx,'Part Number']})",
+            min_value=0.0,
+            step=0.01,
+            key=f"price_{idx}"
+        )
 
-        # Component links
-        component_elements = await page.query_selector_all("a[href*='/product/']")
-        component_links = []
-        component_names = []
-        for el in component_elements:
-            href = await el.get_attribute("href")
-            name = await el.inner_text()
-            name = name.strip()
-            if href not in component_links and name != '':
-                component_links.append(href)
-                component_names.append(name)
+    # Calculate kit-adjusted prices
+    total_individual = sum(df["Component Price ($)"]) if sum(df["Component Price ($)"]) > 0 else 1
+    df["Kit-Adjusted Price ($)"] = df["Component Price ($)"] / total_individual * kit_price
 
-        # Component prices
-        component_prices = []
-        for link in component_links:
-            await page.goto(link)
-            await page.wait_for_timeout(2000)
-            comp_text = await page.content()
-            price = extract_second_price(comp_text)
-            component_prices.append(price)
-
-        await browser.close()
-        return kit_price_auto, component_names, component_prices
-
-# --- Main logic ---
-if kit_url:
-    st.info("Fetching kit and component prices. Please wait...")
-
-    # Fetch automatic prices only if needed
-    if mode == "Automatic from Kit":
-        try:
-            kit_price_auto, component_names, component_prices = asyncio.run(fetch_prices(kit_url))
-            kit_price = kit_price_auto
-        except Exception as e:
-            st.error(f"Error fetching kit or component prices: {e}")
-            st.stop()
-    else:
-        kit_price = manual_kit_price
-        # Still need component names and prices
-        try:
-            _, component_names, component_prices = asyncio.run(fetch_prices(kit_url))
-        except Exception as e:
-            st.error(f"Error fetching component prices: {e}")
-            st.stop()
-
-    st.subheader(f"Kit Price: ${kit_price}")
-
-    # Kit-adjusted prices
-    valid_prices = [p for p in component_prices if p]
-    total_individual = sum(valid_prices)
-    kit_adjusted_prices = [round((p/total_individual)*kit_price,2) if p else None for p in component_prices]
-    percentages = [round((p/total_individual)*100,1) if p else None for p in component_prices]
-
-    # Build DataFrame
-    df = pd.DataFrame({
-        "Component": component_names,
-        "Individual Price": component_prices,
-        "Kit-Adjusted Price": kit_adjusted_prices,
-        "% of Kit": percentages
-    })
-
-    # Refund selection
-    st.write("Select components to refund:")
+    st.subheader("Select Components for Refund")
     refund_total = 0
     refund_flags = []
-    for idx, row in df.iterrows():
-        flag = st.checkbox(f"{row['Component']} - ${row['Kit-Adjusted Price']} ({row['% of Kit']}%)", key=idx)
+    for idx in df.index:
+        flag = st.checkbox(
+            f"{df.at[idx,'Component']} - Kit Price: ${df.at[idx,'Kit-Adjusted Price ($)']:.2f}",
+            key=f"refund_{idx}"
+        )
         refund_flags.append(flag)
         if flag:
-            refund_total += row['Kit-Adjusted Price']
+            refund_total += df.at[idx, "Kit-Adjusted Price ($)"]
 
-    st.markdown(f"<h2 style='color:green'>💰 Total Refund: ${round(refund_total,2)}</h2>", unsafe_allow_html=True)
-    st.text_input("Copy Refund Total:", value=str(round(refund_total,2)), key="copy_refund")
-
-    # Highlight table
-    def highlight_refund(val):
-        return 'background-color: #d1f7d1;' if val in df['Component'][[i for i,f in enumerate(refund_flags) if f]] else ''
-
-    st.dataframe(df.style.applymap(highlight_refund, subset=['Component']))
+    st.markdown(f"<h2 style='color:green'>💰 Total Refund: ${refund_total:.2f}</h2>", unsafe_allow_html=True)
+    st.subheader("Components Table")
+    st.dataframe(df)
