@@ -1,51 +1,78 @@
 import streamlit as st
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 st.set_page_config(page_title="Detroit Axle Refund Calculator", layout="wide")
 st.title("🚗 Detroit Axle Refund Calculator")
+
+# --- Dark/Light mode ---
+theme = st.sidebar.radio("Theme:", ["Light", "Dark"])
+if theme == "Dark":
+    st.markdown("""
+        <style>
+        .stApp {background-color: #0e1117; color: #f0f0f0;}
+        .stTextInput>div>div>input {background-color: #1f1f1f; color: #f0f0f0;}
+        .stCheckbox>div>label {color: #f0f0f0;}
+        .stNumberInput>div>div>input {background-color: #1f1f1f; color: #f0f0f0;}
+        </style>
+        """, unsafe_allow_html=True)
+else:
+    st.markdown("""
+        <style>
+        .stApp {background-color: #ffffff; color: #000000;}
+        </style>
+        """, unsafe_allow_html=True)
 
 # --- Kit URL input ---
 kit_url = st.text_input("Paste Detroit Axle Kit URL:")
 
 if kit_url:
     try:
-        r = requests.get(kit_url, timeout=10)
-        r.raise_for_status()
-        html = r.text
-        soup = BeautifulSoup(html, "html.parser")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(kit_url, timeout=15000)
+            
+            # Wait for kit price to appear
+            page.wait_for_selector("span.price-red", timeout=10000)
+            price_text = page.query_selector("span.price-red").inner_text()
+            kit_price = float(price_text.replace('$','').replace(',',''))
+            st.success(f"Kit price detected: ${kit_price:.2f}")
 
-        # --- Extract kit price ---
-        price_tag = soup.find("span", class_="price-red")
-        if price_tag:
-            kit_price = float(price_tag.text.strip().replace('$','').replace(',',''))
-            st.success(f"Kit price automatically detected: ${kit_price:.2f}")
-        else:
-            st.warning("Could not detect kit price automatically. Enter manually:")
-            kit_price = st.number_input("Kit Price ($):", min_value=0.0, step=0.01)
+            # Click Kit Components toggle
+            toggle_text = "Kit Component Parts Toggle"
+            page.wait_for_selector(f"text={toggle_text}", timeout=10000)
+            page.click(f"text={toggle_text}")
 
-        # --- Paste Kit Components ---
-        st.info("Copy the Kit Components table from the page (Quantity | Name | Part Number) and paste below")
-        comp_text = st.text_area("Paste Component Info here", height=200)
-        rows = []
-        if comp_text:
-            for line in comp_text.strip().split("\n"):
-                parts = [p.strip() for p in line.split("|")]
-                if len(parts) == 3:
-                    qty = int(parts[0])
-                    name = parts[1]
-                    part_number = parts[2]
+            # Wait for table to load
+            page.wait_for_selector("table", timeout=10000)
+            table = page.query_selector("table")
+            
+            # Extract rows
+            rows = []
+            for tr in table.query_selector_all("tr")[1:]:  # skip header
+                tds = tr.query_selector_all("td")
+                if len(tds) >= 3:
+                    qty = int(tds[0].inner_text().strip())
+                    name = tds[1].inner_text().strip()
+                    part_number = tds[2].inner_text().strip()
                     rows.append([qty, name, part_number])
+            
+            browser.close()
 
-        if rows:
+        if not rows:
+            st.warning("Could not detect kit components automatically. Try manually copy-pasting the table.")
+        else:
+            # --- Create DataFrame ---
             df = pd.DataFrame(rows, columns=["Quantity","Component","Part Number"])
             df["Component Price ($)"] = 0.0
             df["Refund?"] = False
 
-            st.subheader("Components Table with Inline Refund Selection")
+            st.subheader("Components Table (Editable Prices & Refund Selection)")
+
+            # Editable table with inline price input and refund checkbox
             for idx in df.index:
-                cols = st.columns([1.5,3,2,2,1])  # qty, name, part#, price, refund
+                cols = st.columns([1.5,3,2,2,1])
                 df.at[idx,"Quantity"] = cols[0].number_input("Qty", min_value=1, value=int(df.at[idx,"Quantity"]), key=f"qty_{idx}")
                 df.at[idx,"Component"] = cols[1].text_input("Name", value=df.at[idx,"Component"], key=f"name_{idx}")
                 df.at[idx,"Part Number"] = cols[2].text_input("Part #", value=df.at[idx,"Part Number"], key=f"pn_{idx}")
@@ -63,7 +90,7 @@ if kit_url:
             refund_total = df.loc[df["Refund?"], "Kit-Adjusted Price ($)"].sum()
             st.markdown(f"<h2 style='color:green'>💰 Total Refund: ${refund_total:.2f}</h2>", unsafe_allow_html=True)
 
-            st.subheader("Components Table Overview")
+            st.subheader("Components Overview")
             st.dataframe(df)
 
     except Exception as e:
