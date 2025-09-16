@@ -38,18 +38,24 @@ if kit_url:
         r.raise_for_status()
         html = r.text
 
-        # --- Extract kit price (second $) ---
-        dollar_matches = re.findall(r"\$(\d+[\.,]?\d*)", html)
+        # --- Extract kit price (more reliable second $) ---
+        # Match patterns like $199.99 or $199 or $1,299.99
+        dollar_matches = re.findall(r"\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)", html)
+        kit_price = None
         if len(dollar_matches) >= 2:
-            kit_price = float(dollar_matches[1].replace(',', ''))
-            st.success(f"Kit price automatically detected: ${kit_price:.2f}")
+            candidates = [float(p.replace(',', '')) for p in dollar_matches if float(p.replace(',', '')) > 10]
+            if len(candidates) >= 2:
+                kit_price = candidates[1]  # second reasonable price
+                st.success(f"Kit price automatically detected: ${kit_price:.2f}")
+            else:
+                st.warning("Could not detect kit price automatically. Please enter manually.")
+                kit_price = st.number_input("Enter Kit Price ($):", min_value=0.0, step=0.01)
         else:
             st.warning("Could not detect kit price automatically. Please enter manually.")
             kit_price = st.number_input("Enter Kit Price ($):", min_value=0.0, step=0.01)
 
         # --- Extract kit components ---
         soup = BeautifulSoup(html, "html.parser")
-        # Attempt to find static table, fallback to manual
         table = soup.find("table")
         if table:
             rows = []
@@ -63,6 +69,7 @@ if kit_url:
             if rows:
                 components_df = pd.DataFrame(rows, columns=["Component", "Part Number", "Quantity"])
                 st.success("Kit components automatically detected.")
+
         if components_df is None:
             st.info("Could not detect components automatically. Please paste manually.")
             comp_text = st.text_area(
@@ -75,35 +82,38 @@ if kit_url:
                 components_df["Quantity"] = pd.to_numeric(components_df["Quantity"], errors='coerce').fillna(1)
 
         if components_df is not None:
-            # Add Component Price column for manual input
+            # Add columns for manual price and refund checkbox
             components_df["Component Price ($)"] = 0.0
+            components_df["Refund?"] = False
 
-            st.subheader("Enter Component Prices")
+            st.subheader("Components Table with Inline Refund Selection")
             for idx in components_df.index:
-                components_df.at[idx, "Component Price ($)"] = st.number_input(
-                    f"{components_df.at[idx,'Component']} (${components_df.at[idx,'Part Number']})",
-                    min_value=0.0,
-                    step=0.01,
-                    key=f"price_{idx}"
+                cols = st.columns([3, 1, 2, 2, 1])  # name, quantity, part#, price input, refund checkbox
+                components_df.at[idx, "Component"] = cols[0].text_input(
+                    "Component Name", value=components_df.at[idx, "Component"], key=f"name_{idx}"
+                )
+                components_df.at[idx, "Quantity"] = cols[1].number_input(
+                    "Quantity", min_value=1, value=int(components_df.at[idx, "Quantity"]), key=f"qty_{idx}"
+                )
+                components_df.at[idx, "Part Number"] = cols[2].text_input(
+                    "Part Number", value=components_df.at[idx, "Part Number"], key=f"pn_{idx}"
+                )
+                components_df.at[idx, "Component Price ($)"] = cols[3].number_input(
+                    "Price ($)", min_value=0.0, step=0.01, key=f"price_{idx}"
+                )
+                components_df.at[idx, "Refund?"] = cols[4].checkbox(
+                    "Refund", key=f"refund_{idx}"
                 )
 
             # Calculate kit-adjusted prices
-            prices = components_df["Component Price ($)"].tolist()
-            total_individual = sum(prices) if sum(prices) > 0 else 1
-            components_df["Kit-Adjusted Price ($)"] = [p / total_individual * kit_price for p in prices]
+            total_individual = sum(components_df["Component Price ($)"]) if sum(components_df["Component Price ($)"]) > 0 else 1
+            components_df["Kit-Adjusted Price ($)"] = [p / total_individual * kit_price for p in components_df["Component Price ($)"]]
 
-            st.subheader("Select Components for Refund")
-            refund_total = 0
-            for idx in components_df.index:
-                flag = st.checkbox(
-                    f"{components_df.at[idx,'Component']} - Kit Price: ${components_df.at[idx,'Kit-Adjusted Price ($)']:.2f}",
-                    key=f"refund_{idx}"
-                )
-                if flag:
-                    refund_total += components_df.at[idx, "Kit-Adjusted Price ($)"]
-
+            # Calculate total refund
+            refund_total = components_df.loc[components_df["Refund?"], "Kit-Adjusted Price ($)"].sum()
             st.markdown(f"<h2 style='color:green'>💰 Total Refund: ${refund_total:.2f}</h2>", unsafe_allow_html=True)
-            st.subheader("Components Table")
+
+            st.subheader("Components Table Overview")
             st.dataframe(components_df)
 
     except Exception as e:
