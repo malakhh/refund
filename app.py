@@ -2,12 +2,19 @@ import streamlit as st
 import pandas as pd
 import re
 import asyncio
+import subprocess
+import sys
+
+# --- Automatically install Playwright Chromium on Streamlit Cloud ---
+subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
+
 from playwright.async_api import async_playwright
 
+# --- Streamlit page setup ---
 st.set_page_config(page_title="Detroit Axle Refund Calculator", layout="wide")
 st.title("🚗 Detroit Axle Refund Calculator")
 
-# Theme toggle
+# --- Theme toggle ---
 theme = st.sidebar.radio("Choose Theme:", ["Light", "Dark"])
 if theme == "Dark":
     st.markdown("""
@@ -26,8 +33,17 @@ else:
         </style>
         """, unsafe_allow_html=True)
 
+# --- Choose kit price mode ---
+mode = st.radio("Choose kit price mode:", ["Automatic from Kit", "Manual Entry"])
+if mode == "Manual Entry":
+    manual_kit_price = st.number_input("Enter Kit Price ($):", min_value=0.0, format="%.2f")
+else:
+    manual_kit_price = None
+
+# --- Kit link input ---
 kit_url = st.text_input("Paste the Detroit Axle Kit Link Here:")
 
+# --- Function to extract second $ price ---
 def extract_second_price(text):
     matches = re.findall(r'\$([0-9,]+(?:\.[0-9]{1,2})?)', text)
     if len(matches) >= 2:
@@ -37,6 +53,7 @@ def extract_second_price(text):
     else:
         return None
 
+# --- Function to fetch kit and component prices using Playwright ---
 async def fetch_prices(kit_url):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -44,9 +61,8 @@ async def fetch_prices(kit_url):
         await page.goto(kit_url)
         await page.wait_for_timeout(3000)  # wait for JS to load
 
-        # Kit price
-        kit_text = await page.content()
-        kit_price = extract_second_price(kit_text)
+        # Kit price (automatic)
+        kit_price_auto = extract_second_price(await page.content())
 
         # Component links
         component_elements = await page.query_selector_all("a[href*='/product/']")
@@ -70,11 +86,28 @@ async def fetch_prices(kit_url):
             component_prices.append(price)
 
         await browser.close()
-        return kit_price, component_names, component_prices
+        return kit_price_auto, component_names, component_prices
 
+# --- Main logic ---
 if kit_url:
     st.info("Fetching kit and component prices. Please wait...")
-    kit_price, component_names, component_prices = asyncio.run(fetch_prices(kit_url))
+
+    # Fetch automatic prices only if needed
+    if mode == "Automatic from Kit":
+        try:
+            kit_price_auto, component_names, component_prices = asyncio.run(fetch_prices(kit_url))
+            kit_price = kit_price_auto
+        except Exception as e:
+            st.error(f"Error fetching kit or component prices: {e}")
+            st.stop()
+    else:
+        kit_price = manual_kit_price
+        # Still need component names and prices
+        try:
+            _, component_names, component_prices = asyncio.run(fetch_prices(kit_url))
+        except Exception as e:
+            st.error(f"Error fetching component prices: {e}")
+            st.stop()
 
     st.subheader(f"Kit Price: ${kit_price}")
 
