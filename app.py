@@ -6,25 +6,6 @@ from bs4 import BeautifulSoup
 st.set_page_config(page_title="Detroit Axle Refund Calculator", layout="wide")
 st.title("🚗 Detroit Axle Refund Calculator")
 
-# --- Theme ---
-theme = st.sidebar.radio("Theme:", ["Light", "Dark"])
-if theme == "Dark":
-    st.markdown("""
-        <style>
-        .stApp {background-color: #0e1117; color: #f0f0f0;}
-        .stTextInput>div>div>input {background-color: #1f1f1f; color: #f0f0f0;}
-        .stCheckbox>div>label {color: #f0f0f0;}
-        </style>
-        """, unsafe_allow_html=True)
-else:
-    st.markdown("""
-        <style>
-        .stApp {background-color: #ffffff; color: #000000;}
-        .stTextInput>div>div>input {background-color: #f9f9f9; color: #000000;}
-        .stCheckbox>div>label {color: #000000;}
-        </style>
-        """, unsafe_allow_html=True)
-
 # --- Kit URL input ---
 kit_url = st.text_input("Paste Detroit Axle Kit URL:")
 
@@ -35,7 +16,7 @@ if kit_url:
         html = r.text
         soup = BeautifulSoup(html, "html.parser")
 
-        # --- Extract kit price from red discounted price ---
+        # --- Extract kit price ---
         price_tag = soup.find("span", class_="price-red")
         if price_tag:
             kit_price = float(price_tag.text.strip().replace('$','').replace(',',''))
@@ -44,39 +25,21 @@ if kit_url:
             st.warning("Could not detect kit price automatically. Enter manually:")
             kit_price = st.number_input("Kit Price ($):", min_value=0.0, step=0.01)
 
-        # --- Extract kit components table ---
-        # Find the first <table> after "Kit Components" toggle
-        components_table = None
-        for h3 in soup.find_all(["h3","h2","h4"]):
-            if "Kit Components" in h3.get_text():
-                # Look for next table
-                table = h3.find_next("table")
-                if table:
-                    components_table = table
-                    break
-
+        # --- Paste Kit Components ---
+        st.info("Copy the Kit Components table from the page (Quantity | Name | Part Number) and paste below")
+        comp_text = st.text_area("Paste Component Info here", height=200)
         rows = []
-        if components_table:
-            for tr in components_table.find_all("tr")[1:]:  # skip header
-                cols = tr.find_all("td")
-                if len(cols) >= 3:
-                    qty = int(cols[0].text.strip())
-                    name = cols[1].text.strip()
-                    part_number = cols[2].text.strip()
+        if comp_text:
+            for line in comp_text.strip().split("\n"):
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) == 3:
+                    qty = int(parts[0])
+                    name = parts[1]
+                    part_number = parts[2]
                     rows.append([qty, name, part_number])
-            st.success("Kit components automatically detected.")
-        else:
-            st.warning("Could not detect components automatically. Paste manually:")
-            comp_text = st.text_area(
-                "Paste Component Info (Qty | Name | Part Number) separated by |, one per line",
-                height=150
-            )
-            if comp_text:
-                rows = [line.strip().split("|") for line in comp_text.strip().split("\n") if line.strip()]
 
         if rows:
             df = pd.DataFrame(rows, columns=["Quantity","Component","Part Number"])
-            df["Quantity"] = pd.to_numeric(df["Quantity"], errors='coerce').fillna(1)
             df["Component Price ($)"] = 0.0
             df["Refund?"] = False
 
