@@ -37,38 +37,38 @@ if kit_url:
         r = requests.get(kit_url, timeout=10)
         r.raise_for_status()
         html = r.text
+        soup = BeautifulSoup(html, "html.parser")
 
-        # --- Extract kit price (more reliable second $) ---
-        # Match patterns like $199.99 or $199 or $1,299.99
-        dollar_matches = re.findall(r"\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)", html)
-        kit_price = None
-        if len(dollar_matches) >= 2:
-            candidates = [float(p.replace(',', '')) for p in dollar_matches if float(p.replace(',', '')) > 10]
-            if len(candidates) >= 2:
-                kit_price = candidates[1]  # second reasonable price
-                st.success(f"Kit price automatically detected: ${kit_price:.2f}")
-            else:
-                st.warning("Could not detect kit price automatically. Please enter manually.")
-                kit_price = st.number_input("Enter Kit Price ($):", min_value=0.0, step=0.01)
+        # --- Extract kit price (red discounted price) ---
+        price_tag = soup.find("span", class_="price-red")  # most pages have price in this class
+        if price_tag:
+            kit_price = float(price_tag.text.strip().replace('$','').replace(',',''))
+            st.success(f"Kit price automatically detected: ${kit_price:.2f}")
         else:
             st.warning("Could not detect kit price automatically. Please enter manually.")
             kit_price = st.number_input("Enter Kit Price ($):", min_value=0.0, step=0.01)
 
         # --- Extract kit components ---
-        soup = BeautifulSoup(html, "html.parser")
-        table = soup.find("table")
-        if table:
-            rows = []
-            for tr in table.find_all("tr"):
-                cols = [td.get_text(strip=True) for td in tr.find_all("td")]
-                if len(cols) >= 2:
-                    name = cols[0]
-                    part_number = cols[1]
-                    quantity = int(cols[2]) if len(cols) >= 3 and cols[2].isdigit() else 1
+        components_section = soup.find("div", class_="kit-components")  # adjust based on actual HTML
+        rows = []
+        if components_section:
+            for li in components_section.find_all("li"):
+                text = li.get_text(strip=True)
+                # Example format: "Front Rotor | FR1234 | Qty: 2"
+                parts = text.split("|")
+                if len(parts) >= 2:
+                    name = parts[0].strip()
+                    part_number = parts[1].strip()
+                    # Quantity parsing
+                    quantity = 1
+                    if len(parts) >= 3:
+                        qty_match = re.search(r'\d+', parts[2])
+                        if qty_match:
+                            quantity = int(qty_match.group())
                     rows.append([name, part_number, quantity])
-            if rows:
-                components_df = pd.DataFrame(rows, columns=["Component", "Part Number", "Quantity"])
-                st.success("Kit components automatically detected.")
+        if rows:
+            components_df = pd.DataFrame(rows, columns=["Component", "Part Number", "Quantity"])
+            st.success("Kit components automatically detected.")
 
         if components_df is None:
             st.info("Could not detect components automatically. Please paste manually.")
