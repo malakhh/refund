@@ -1,13 +1,9 @@
 import streamlit as st
 import pandas as pd
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-import time
 import re
+import asyncio
+from playwright.async_api import async_playwright
 
-# Streamlit page setup
 st.set_page_config(page_title="Detroit Axle Refund Calculator", layout="wide")
 st.title("🚗 Detroit Axle Refund Calculator")
 
@@ -30,10 +26,8 @@ else:
         </style>
         """, unsafe_allow_html=True)
 
-# Input
 kit_url = st.text_input("Paste the Detroit Axle Kit Link Here:")
 
-# Function to extract second $ price from text
 def extract_second_price(text):
     matches = re.findall(r'\$([0-9,]+(?:\.[0-9]{1,2})?)', text)
     if len(matches) >= 2:
@@ -43,84 +37,76 @@ def extract_second_price(text):
     else:
         return None
 
-# Main processing
-if kit_url:
-    st.info("Fetching kit and component prices. Please wait...")
-    try:
-        # Selenium setup
-        options = Options()
-        options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        driver = webdriver.Chrome(options=options)
+async def fetch_prices(kit_url):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(kit_url)
+        await page.wait_for_timeout(3000)  # wait for JS to load
 
-        # Load kit page
-        driver.get(kit_url)
-        time.sleep(3)
-
-        # Extract kit price (second $ = red price)
-        kit_text = driver.find_element(By.TAG_NAME, "body").text
+        # Kit price
+        kit_text = await page.content()
         kit_price = extract_second_price(kit_text)
-        if not kit_price:
-            st.error("Could not detect kit price automatically.")
-            driver.quit()
-            st.stop()
-        st.subheader(f"Kit Price: ${kit_price}")
 
-        # Extract component links
-        component_elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='/product/']")
+        # Component links
+        component_elements = await page.query_selector_all("a[href*='/product/']")
         component_links = []
         component_names = []
         for el in component_elements:
-            href = el.get_attribute("href")
-            name = el.text.strip()
+            href = await el.get_attribute("href")
+            name = await el.inner_text()
+            name = name.strip()
             if href not in component_links and name != '':
                 component_links.append(href)
                 component_names.append(name)
 
-        # Extract component prices
+        # Component prices
         component_prices = []
         for link in component_links:
-            driver.get(link)
-            time.sleep(2)
-            comp_text = driver.find_element(By.TAG_NAME, "body").text
+            await page.goto(link)
+            await page.wait_for_timeout(2000)
+            comp_text = await page.content()
             price = extract_second_price(comp_text)
             component_prices.append(price)
 
-        driver.quit()
+        await browser.close()
+        return kit_price, component_names, component_prices
 
-        # Kit-adjusted prices
-        valid_prices = [p for p in component_prices if p]
-        total_individual = sum(valid_prices)
-        kit_adjusted_prices = [round((p/total_individual)*kit_price,2) if p else None for p in component_prices]
-        percentages = [round((p/total_individual)*100,1) if p else None for p in component_prices]
+if kit_url:
+    st.info("Fetching kit and component prices. Please wait...")
+    kit_price, component_names, component_prices = asyncio.run(fetch_prices(kit_url))
 
-        # Build DataFrame
-        df = pd.DataFrame({
-            "Component": component_names,
-            "Individual Price": component_prices,
-            "Kit-Adjusted Price": kit_adjusted_prices,
-            "% of Kit": percentages
-        })
+    st.subheader(f"Kit Price: ${kit_price}")
 
-        # Refund selection
-        st.write("Select components to refund:")
-        refund_total = 0
-        refund_flags = []
-        for idx, row in df.iterrows():
-            flag = st.checkbox(f"{row['Component']} - ${row['Kit-Adjusted Price']} ({row['% of Kit']}%)", key=idx)
-            refund_flags.append(flag)
-            if flag:
-                refund_total += row['Kit-Adjusted Price']
+    # Kit-adjusted prices
+    valid_prices = [p for p in component_prices if p]
+    total_individual = sum(valid_prices)
+    kit_adjusted_prices = [round((p/total_individual)*kit_price,2) if p else None for p in component_prices]
+    percentages = [round((p/total_individual)*100,1) if p else None for p in component_prices]
 
-        st.markdown(f"<h2 style='color:green'>💰 Total Refund: ${round(refund_total,2)}</h2>", unsafe_allow_html=True)
-        st.text_input("Copy Refund Total:", value=str(round(refund_total,2)), key="copy_refund")
+    # Build DataFrame
+    df = pd.DataFrame({
+        "Component": component_names,
+        "Individual Price": component_prices,
+        "Kit-Adjusted Price": kit_adjusted_prices,
+        "% of Kit": percentages
+    })
 
-        # Highlight table
-        def highlight_refund(val):
-            return 'background-color: #d1f7d1;' if val in df['Component'][[i for i,f in enumerate(refund_flags) if f]] else ''
+    # Refund selection
+    st.write("Select components to refund:")
+    refund_total = 0
+    refund_flags = []
+    for idx, row in df.iterrows():
+        flag = st.checkbox(f"{row['Component']} - ${row['Kit-Adjusted Price']} ({row['% of Kit']}%)", key=idx)
+        refund_flags.append(flag)
+        if flag:
+            refund_total += row['Kit-Adjusted Price']
 
-        st.dataframe(df.style.applymap(highlight_refund, subset=['Component']))
+    st.markdown(f"<h2 style='color:green'>💰 Total Refund: ${round(refund_total,2)}</h2>", unsafe_allow_html=True)
+    st.text_input("Copy Refund Total:", value=str(round(refund_total,2)), key="copy_refund")
 
-    except Exception as e:
-        st.error(f"Error fetching kit or component prices: {e}")
+    # Highlight table
+    def highlight_refund(val):
+        return 'background-color: #d1f7d1;' if val in df['Component'][[i for i,f in enumerate(refund_flags) if f]] else ''
+
+    st.dataframe(df.style.applymap(highlight_refund, subset=['Component']))
